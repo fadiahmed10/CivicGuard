@@ -5,6 +5,11 @@ require("dotenv").config()
 const { PinataSDK } = require("pinata-web3")
 const multer = require('multer');
 const fs = require("fs")
+const axios = require('axios');
+
+const AI_VERIFIER_URL = "http://localhost:8002/verify-report";
+const SCORE_THRESHOLD = 40;
+const QUARANTINE_FILE = "./quarantine_reports.json";
 
 const app = express();
 app.use(cors());
@@ -16,7 +21,7 @@ const pinata = new PinataSDK({
 })
 
 // Connect to Polygon node Infura
-const web3 = new Web3('https://polygon-amoy.infura.io/v3/ff501c3063244b08b92df7162c094209');
+const web3 = new Web3(process.env.RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com');
 const contractAddress = process.env.CONTRACT_ADDRESS;
 const contractABI = require('./DrugUseReportingABI.json'); // Updated ABI
 const contract = new web3.eth.Contract(contractABI, contractAddress);
@@ -39,27 +44,73 @@ const storage = multer.diskStorage({
 const uploadMiddleware = multer({ storage: storage });
 
 app.get('/', (req, res) => {
-    res.send("Hello World")
+    res.send("AnonSentra Backend Operational")
 });
+
+async function verifyWithAI(location, description, imageUrl = null) {
+    try {
+        const response = await axios.post(AI_VERIFIER_URL, {
+            location,
+            description,
+            image_url: imageUrl,
+            timestamp: new Date().toISOString()
+        });
+        return response.data;
+    } catch (error) {
+        console.error("AI Verification failed, falling back to Needs Review:", error.message);
+        return { legitimacy_score: 50, classification: "needs_review", reasoning: ["AI service unreachable"] };
+    }
+}
+
+function quarantineReport(reportData) {
+    let reports = [];
+    if (fs.existsSync(QUARANTINE_FILE)) {
+        reports = JSON.parse(fs.readFileSync(QUARANTINE_FILE));
+    }
+    reports.push({ ...reportData, quarantinedAt: new Date().toISOString() });
+    fs.writeFileSync(QUARANTINE_FILE, JSON.stringify(reports, null, 2));
+}
 
 // API to upload report
 app.post('/upload-report', async (req, res) => {
-    const { textData } = req.body;
+    const { textData, location } = req.body;
     try {
+        const aiResult = await verifyWithAI(location || "Unknown", textData);
+        
+        if (aiResult.legitimacy_score < SCORE_THRESHOLD) {
+            quarantineReport({ textData, location, aiResult });
+            return res.status(200).json({ 
+                success: false, 
+                message: "Report quarantined due to low legitimacy score", 
+                aiResult 
+            });
+        }
+
         const gasPrice = await web3.eth.getGasPrice();
         await contract.methods.addReport(textData).send({ from: account.address, gas: 500000, gasPrice: gasPrice });
-        res.status(200).json({ success: true });
+        res.status(200).json({ success: true, aiResult });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 app.post('/upload-link-and-report', async (req, res) => {
-    const { textData, url } = req.body;
+    const { textData, url, location } = req.body;
     try {
+        const aiResult = await verifyWithAI(location || "Unknown", textData);
+
+        if (aiResult.legitimacy_score < SCORE_THRESHOLD) {
+            quarantineReport({ textData, url, location, aiResult });
+            return res.status(200).json({ 
+                success: false, 
+                message: "Report quarantined due to low legitimacy score", 
+                aiResult 
+            });
+        }
+
         const gasPrice = await web3.eth.getGasPrice();
         await contract.methods.addReport(textData, url).send({ from: account.address, gas: 500000, gasPrice: gasPrice });
-        res.status(200).json({ success: true });
+        res.status(200).json({ success: true, aiResult });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -67,48 +118,49 @@ app.post('/upload-link-and-report', async (req, res) => {
 
 app.post('/upload-image-and-report', uploadMiddleware.single('image'), async (req, res) => {
     try {
-        const { textData } = req.body;
-        const file = req.file; // Access the uploaded file
+        const { textData, location } = req.body;
+        const file = req.file;
 
         if (!file) {
             return res.status(400).json({ success: false, error: 'No file uploaded' });
         }
 
-        // Upload the file to Pinata
-        // Generate a random 6-character string
-        const randomSuffix = crypto.randomUUID().toString('hex'); // Generates 6 characters
-
-        // Create a new filename with the format: originalname_random6characters
+        // 1. Temporary upload to IPFS for AI visibility
+        const randomSuffix = crypto.randomUUID().toString('hex');
         const newFileName = `${file.originalname.split('.')[0]}_${randomSuffix}.${file.originalname.split('.').pop()}`;
-
-        // Read the file content
         const fileContent = fs.readFileSync(file.path);
-
-        // Create a new Blob and File object with the modified filename
         const blob = new Blob([fileContent]);
         const pinataFile = new File([blob], newFileName, { type: file.mimetype });
-
-        // Upload the file to Pinata
         const pinataResponse = await pinata.upload.file(pinataFile);
-
-        // Get the complete URL of the uploaded image
         const imageUrl = `https://${process.env.GATEWAY_URL}/ipfs/${pinataResponse.IpfsHash}`;
 
-        // Add the report to the smart contract
-        const gasPrice = await web3.eth.getGasPrice();
+        // 2. AI Verification with Multimodal support
+        const aiResult = await verifyWithAI(location || "Unknown", textData, imageUrl);
 
+        if (aiResult.legitimacy_score < SCORE_THRESHOLD) {
+            // Note: We leave the image on IPFS but quarantine the metadata
+            quarantineReport({ textData, location, imageUrl, aiResult });
+            fs.unlinkSync(file.path); // Clean up disk
+            return res.status(200).json({ 
+                success: false, 
+                message: "Report quarantined due to low legitimacy score", 
+                aiResult 
+            });
+        }
+
+        // 3. Final Blockchain Submission
+        const gasPrice = await web3.eth.getGasPrice();
         await contract.methods.addReport(textData, imageUrl).send({
             from: account.address,
             gas: 500000,
             gasPrice: gasPrice
         });
 
-        // Clean up the temporary file
         fs.unlinkSync(file.path);
-
-        res.status(200).json({ success: true, message: 'Report and image uploaded successfully', imageUrl });
+        res.status(200).json({ success: true, message: 'Report and image uploaded successfully', imageUrl, aiResult });
     } catch (error) {
         console.error(error);
+        if (req.file) fs.unlinkSync(req.file.path);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -116,13 +168,13 @@ app.post('/upload-image-and-report', uploadMiddleware.single('image'), async (re
 app.get('/reports', async (req, res) => {
     try {
         // Verify ownership
-        const owner = await getOwner();
-        if (owner.toLowerCase() !== config.OWNER_ADDRESS.toLowerCase()) {
+        const ownerAddress = await contract.methods.owner().call();
+        if (ownerAddress.toLowerCase() !== account.address.toLowerCase()) {
             return res.status(403).json({ error: 'Unauthorized: Not the contract owner' });
         }
 
         // Call getReports() function
-        const reports = await drugUseContract.methods.getReports().call();
+        const reports = await contract.methods.getReports().call({ from: account.address });
         
         // Transform the reports into a more readable format
         const formattedReports = reports.map(report => ({

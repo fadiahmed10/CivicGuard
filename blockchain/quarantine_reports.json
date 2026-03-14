@@ -1,0 +1,30 @@
+[
+  {
+    "textData": "bad report",
+    "location": "Downtown",
+    "aiResult": {
+      "legitimacy_score": 10,
+      "classification": "likely_spam",
+      "reasoning": [
+        "Description is too short (under 15 characters)."
+      ]
+    },
+    "quarantinedAt": "2026-03-14T08:52:46.940Z"
+  },
+  {
+    "textData": "Report of suspicious activity near Platform 1.",
+    "location": "Kozhikode Railway Station",
+    "imageUrl": "https://cyan-faithful-damselfly-92.mypinata.cloud/ipfs/bafybeihzzw3ylfmfgmtwv3jlsb55cz2u3v6dtlxpeppkitjkbdqol7mvia",
+    "aiResult": {
+      "legitimacy_score": 10,
+      "classification": "likely_spam",
+      "reasoning": [
+        "The description 'suspicious activity' is extremely vague and lacks any specific details relevant to illegal drug activity.",
+        "The report provides no context or observations (e.g., individuals, items, behaviors, smells) that would link the reported activity to drugs.",
+        "While the location is specific, the core activity reported offers almost no actionable intelligence for a drug-reporting system.",
+        "The image depicts an abstract blue wavy shape, commonly recognized as a digital wallpaper. There is no evidence of illegal drug activity, suspicious exchanges, or related paraphernalia."
+      ]
+    },
+    "quarantinedAt": "2026-03-14T08:55:35.099Z"
+  }
+]
